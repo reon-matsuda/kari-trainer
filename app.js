@@ -38,6 +38,24 @@
   var device = load("device", null);
   if (!device) { device = rid(6); save("device", device); }
 
+  // サーバーから "2026-11-05T15:00:00.000Z" のような形で日付が届いても、設定のタイムゾーンの "2026-11-06" に直す
+  function normDay(v) {
+    if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+    var t = new Date(v); if (isNaN(t)) return v;
+    try { return new Intl.DateTimeFormat("en-CA", { timeZone: settings.tz || "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).format(t); }
+    catch (e) { return t.toISOString().slice(0, 10); }
+  }
+  function normPlan(p) {
+    if (!p) return p;
+    p.startDate = normDay(p.startDate); p.endDate = normDay(p.endDate); p.introEnd = normDay(p.introEnd);
+    p.laps = Number(p.laps) || 1; p.createdAt = Number(p.createdAt); p.updatedAt = Number(p.updatedAt);
+    p.deleted = p.deleted === true || p.deleted === "true";
+    if (typeof p.iv === "string") p.iv = p.iv.split(",").map(Number);
+    if (!Array.isArray(p.iv) || !p.iv.length || p.iv.some(isNaN)) p.iv = schedule(p.startDate, p.endDate, p.laps).iv;
+    return p;
+  }
+  function normEvent(e) { e.d = normDay(e.d); e.ok = Number(e.ok) ? 1 : 0; e.ts = Number(e.ts); return e; }
+
   function persist() { save("plans", plans); save("events", events); save("queue", queue); save("settings", settings); }
 
   // ---------------- 小物 ----------------
@@ -112,8 +130,13 @@
   function planEvents(pid) { var a = events[pid] || []; a.sort(function (x, y) { return x.ts - y.ts; }); return a; }
 
   // その日の演習問題（その日より前のログだけで決まるので、どの端末でも同じになる）
+  var setMemo = {};
   function daySet(plan, D, evs) {
     evs = evs || planEvents(plan.id);
+    var nb = 0, lastTs = 0;
+    for (var i = 0; i < evs.length; i++) if (evs[i].d < D) { nb++; if (evs[i].ts > lastTs) lastTs = evs[i].ts; }
+    var mkey = [plan.id, D, nb, lastTs, plan.startDate, plan.endDate, plan.laps, plan.introEnd].join("|");
+    if (setMemo[mkey]) return setMemo[mkey];
     var st = fold(plan, evs, D);
     var due = [], fresh = [];
     var order = seededShuffle(QUESTIONS.map(function (q) { return q.id; }), plan.id);
@@ -122,20 +145,106 @@
       if (s.laps === 0) fresh.push(id);
       else if (s.due && s.due <= D) due.push(id);
     });
-    // 新しい問題の数：①1周目の締切（introEnd）に間に合う最低数と、
-    // ②「残りの周回ぶん ÷ 残り日数」（＝日数で按分した1日の量）から復習分を引いた数、の大きい方
-    var quota = 0;
+    var quota = 0, plan2 = null;
     if (D >= plan.startDate) {
-      var left = diffDays(plan.introEnd, D) + 1;
-      var minNew = left >= 1 ? Math.ceil(fresh.length / left) : fresh.length;
-      var units = 0, N = plan.laps || 1;
-      Object.keys(st).forEach(function (id) { units += N - Math.min(st[id].laps, N); });
-      var daysLeft = Math.max(1, diffDays(plan.endDate, D) + 1);
-      var target = Math.ceil(units / daysLeft);
-      quota = Math.min(fresh.length, Math.max(minNew, target - due.length));
+      plan2 = planAhead(plan, D, st, fresh.length, accRate(evs, D));
+      quota = plan2.news[0];
+      // 前日の「今日やる分」で解き残した新しい問題は、必ず今日に引き継ぐ
+      // （前日のセット自体も同じ手順で決まるので、さかのぼって求める。復習は期限切れのまま残るので自動で引き継がれる）
+      var prev = addDays(D, -1);
+      if (prev >= plan.startDate) {
+        var left = daySet(plan, prev, evs).newIds.filter(function (id) { return st[id].laps === 0; });
+        if (left.length) quota = Math.max(quota, fresh.indexOf(left[left.length - 1]) + 1);
+      }
+      quota = Math.min(quota, fresh.length);
     }
     var newIds = fresh.slice(0, quota);
-    return { ids: due.concat(newIds), review: due.length, fresh: newIds.length, freshAll: fresh, st: st };
+    var res = { ids: due.concat(newIds), newIds: newIds, review: due.length, fresh: newIds.length, freshAll: fresh, st: st, load: plan2 && plan2.load };
+    setMemo[mkey] = res;
+    return res;
+  }
+
+  // 今日以降の計画を立て直す。
+  //  1) すでに解いた問題が、忘却曲線どおりなら今後どの日に復習として出てくるかを数える（これまでの正答率で、間違えて翌日に戻る分も見込む）
+  //  2) 新しい問題を日 k に x 問入れると、k + 1日, +3日, +7日… に復習が x 問ずつ増える
+  //  3) まず新しい問題を1周目の締切（introEnd）までの日数で均等に割り振り、
+  //     「ある日の新しい問題を別の日へ移すと、毎日の量（新規＋復習）のばらつきが減るか」を試して、減る限り移し続ける
+  //     ばらつきは「各日の問題数の4乗の合計」で測る（いちばん多い日を特に強く減らそうとする）
+  var planMemo = {};
+  // 計画に使う正答率の見込み：その日より前の解答から。記録が少ないうちは85%と仮定して混ぜる
+  function accRate(evs, D) {
+    var n = 0, ok = 0;
+    for (var i = 0; i < evs.length; i++) { var e = evs[i]; if (e.d < D) { n++; if (e.ok) ok++; } }
+    var prior = 30, r = (ok + 0.85 * prior) / (n + prior);
+    return Math.round(Math.min(1, Math.max(0.5, r)) * 20) / 20; // 5%きざみ（計算の使い回しのため）
+  }
+
+  // 1問の今後の出題回数の見込み（期待値）。正解率 p なら次の復習日へ、間違えたら翌日にもう一度
+  var expMemo = {};
+  function expect(first, stage0, p, n, iv) {
+    var key = first + "|" + stage0 + "|" + p + "|" + n + "|" + iv.join(".");
+    if (expMemo[key]) return expMemo[key];
+    var L = iv.length, E = [], m = [];
+    for (var t = 0; t < n; t++) { E.push(0); m.push([]); }
+    if (first < n) m[first][Math.min(stage0, L)] = 1;
+    for (t = 0; t < n; t++) {
+      for (var s = 0; s <= L; s++) {
+        var w = m[t][s]; if (!w || w < 1e-4) continue;
+        E[t] += w;
+        var tc = t + iv[Math.min(s, L - 1)], ns = Math.min(s + 1, L);
+        if (tc < n) m[tc][ns] = (m[tc][ns] || 0) + w * p;
+        if (t + 1 < n && p < 1) m[t + 1][0] = (m[t + 1][0] || 0) + w * (1 - p);
+      }
+    }
+    return (expMemo[key] = E);
+  }
+
+  function planAhead(plan, D, st, freshCount, p) {
+    p = p == null ? 1 : p;
+    var iv = plan.iv || BASE_IV, end = plan.endDate < D ? D : plan.endDate;
+    var n = diffDays(end, D) + 1;
+    var kIntro = Math.max(0, Math.min(n - 1, diffDays(plan.introEnd, D)));
+    var base = []; for (var k = 0; k < n; k++) base.push(0);
+    Object.keys(st).forEach(function (id) {
+      var s = st[id]; if (!s.laps || !s.due) return;
+      var E = expect(Math.max(0, diffDays(s.due, D)), s.stage, p, n, iv);
+      for (var t = 0; t < n; t++) base[t] += E[t];
+    });
+    var key = [D, end, plan.introEnd, iv.join("."), freshCount, p, base.map(function (v) { return v.toFixed(2); }).join(".")].join("|");
+    if (planMemo[key]) return planMemo[key];
+    // 新しい問題1問を入れた日を0日目としたときの、その後の出題回数の見込み
+    var patE = expect(0, 0, p, n, iv), pat = [], patW = [];
+    for (k = 0; k < n; k++) if (patE[k] > 1e-3) { pat.push(k); patW.push(patE[k]); }
+    var news = [], load = base.slice(), days = kIntro + 1;
+    for (k = 0; k < n; k++) news.push(k <= kIntro ? Math.floor(freshCount / days) + (k < freshCount % days ? 1 : 0) : 0);
+    function add(day, x) { for (var j = 0; j < pat.length; j++) if (day + pat[j] < n) load[day + pat[j]] += x * patW[j]; }
+    for (k = 0; k <= kIntro; k++) if (news[k]) add(k, news[k]);
+    function gain(i, j, m) { // i 日目の m 問を j 日目へ移したときの「2乗の合計」の減り方
+      var before = 0, after = 0, touched = {}, idx = [], p, d;
+      for (p = 0; p < pat.length; p++) { d = i + pat[p]; if (d < n && !touched[d]) { touched[d] = 1; idx.push(d); } d = j + pat[p]; if (d < n && !touched[d]) { touched[d] = 1; idx.push(d); } }
+      idx.forEach(function (d) { var v = load[d] * load[d]; before += v * v; });
+      add(i, -m); add(j, m);
+      idx.forEach(function (d) { var v = load[d] * load[d]; after += v * v; });
+      add(j, -m); add(i, m);
+      return before - after;
+    }
+    var steps = [16, 8, 4, 2, 1];
+    for (var si = 0; si < steps.length; si++) {
+      var m = steps[si], moved = true, guard = 0;
+      while (moved && guard++ < 400) {
+        moved = false;
+        for (var i = 0; i <= kIntro; i++) {
+          if (news[i] < m) continue;
+          var bestJ = -1, bestG = 0;
+          for (var j = 0; j <= kIntro; j++) { if (j === i) continue; var g = gain(i, j, m); if (g > bestG) { bestG = g; bestJ = j; } }
+          if (bestJ >= 0) { add(i, -m); add(bestJ, m); news[i] -= m; news[bestJ] += m; moved = true; }
+        }
+      }
+    }
+    load = load.map(function (v) { return Math.round(v); });
+    var res = { news: news, load: load, mx: Math.max.apply(null, load) };
+    planMemo[key] = res;
+    return res;
   }
 
   function summary(plan) {
@@ -208,6 +317,7 @@
     setSync("wait", "受信中…");
     return api("listPlans").then(function (j) {
       (j.plans || []).forEach(function (rp) {
+        normPlan(rp);
         var lp = plans[rp.id];
         if (!lp || (rp.updatedAt || 0) > (lp.updatedAt || 0)) plans[rp.id] = rp;
       });
@@ -223,7 +333,7 @@
     return api("pullEvents", { pid: pid }).then(function (j) {
       var have = {}; (events[pid] || []).forEach(function (e) { have[e.eid] = 1; });
       var added = 0;
-      (j.events || []).forEach(function (e) { if (!have[e.eid]) { (events[pid] = events[pid] || []).push(e); added++; } });
+      (j.events || []).forEach(function (e) { normEvent(e); if (!have[e.eid]) { (events[pid] = events[pid] || []).push(e); added++; } });
       persist(); return added > 0;
     }).catch(function (e) { setSync("err", "受信できませんでした"); console.warn(e); return false; });
   }
@@ -347,8 +457,12 @@
       $("#pf-err").hidden = !err; $("#pf-err").textContent = err;
       if (err) { $("#pf-prev").innerHTML = ""; return null; }
       var sc = schedule(s, e, laps);
-      $("#pf-prev").innerHTML = '<div>期間 <b>' + sc.days + '</b> 日・合計 <b>' + (QUESTIONS.length * laps) + '</b> 問ぶん</div>' +
-        '<div>1日あたり 平均 <b>' + sc.perDay + '</b> 問</div>' +
+      $("#pf-prev").innerHTML = '<div>期間 <b>' + sc.days + '</b> 日・' + laps + '周ぶん <b>' + (QUESTIONS.length * laps) + '</b> 問</div>' +
+        (function () {
+          var pa = planAhead({ iv: sc.iv, endDate: e, introEnd: sc.introEnd }, s, {}, QUESTIONS.length, 0.85);
+          var tot = pa.load.reduce(function (a, b) { return a + b; }, 0);
+          return '<div>1日あたり 約 <b>' + Math.round(tot / sc.days) + '</b> 問（多い日で ' + pa.mx + ' 問）</div><div class="small">間違えた問題のやり直しと、周回を終えた問題の復習も含みます。正答率85%と見込んだ量で、実際の正答率に合わせて毎日計算し直します。</div>';
+        })() +
         '<div class="small">1周目（新しい問題）は ' + jp(sc.introEnd) + ' までに全問を一通り</div>' +
         (laps > 1 ? '<div class="small">復習の間隔：' + sc.iv.slice(0, laps - 1).join("日 → ") + '日後</div>' : "");
       return sc;
@@ -553,8 +667,9 @@
       if (!ids.length) { toast("今日の分は終わっています"); return; }
     } else if (go === "ahead") {
       var inSet = {}; s.set.ids.forEach(function (id) { inSet[id] = 1; });
-      ids = shuffle(s.set.freshAll.filter(function (id) { return !inSet[id]; })).slice(0, 10);
-      if (!ids.length) ids = shuffle(s.set.freshAll).slice(0, 10);
+      // 明日以降に出る予定の順番どおりに前倒しする（出題はシャッフル）
+      ids = shuffle(s.set.freshAll.filter(function (id) { return !inSet[id]; }).slice(0, 10));
+      if (!ids.length) ids = shuffle(s.set.freshAll.slice(0, 10));
       title = "先取り";
       if (!ids.length) { toast("まだ解いていない問題はありません"); return; }
     } else if (go === "wrong") {
@@ -680,6 +795,11 @@
   });
 
   // ---------------- 起動 ----------------
+  // 前の版で壊れた形のまま保存された計画・記録を、起動時に直す
+  Object.keys(plans).forEach(function (id) { normPlan(plans[id]); });
+  Object.keys(events).forEach(function (pid) { events[pid].forEach(normEvent); });
+  persist();
+
   window.KARI = { schedule: schedule, fold: fold, daySet: daySet, addDays: addDays }; // テスト用
   render();
   if (apiReady()) pullPlans().then(function () { if (view.name === "slots") render(); });
