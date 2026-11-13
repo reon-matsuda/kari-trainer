@@ -506,6 +506,9 @@
       '</select></div>' +
       '<div class="err" id="sf-msg" hidden></div>' +
       '<div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" type="submit">保存して接続テスト</button><button class="btn" type="button" data-clear>同期をやめる</button></div></form>' +
+      '<form class="panel stack" id="ff" novalidate><h3 style="font-size:15px">図のパスワード</h3><p class="small muted" style="margin:0">足跡・猟具などの解説に付く図（講習資料から切り出したもの）は、暗号化して置いてあります。パスワードを入れた端末だけで表示されます。</p>' +
+      '<div class="field"><input type="password" id="ff-key" autocomplete="off" placeholder="xxxx-xxxx-xxxx" value="' + esc(settings.figKey || "") + '"></div>' +
+      '<div class="err" id="ff-msg" hidden></div><div><button class="btn" type="submit">保存して確認</button></div></form>' +
       '<div class="panel stack"><h3 style="font-size:15px">バックアップ</h3><p class="small muted" style="margin:0">計画と解答記録をテキストでコピーできます。別の端末で「読み込む」に貼り付けると復元できます。</p>' +
       '<textarea id="bk" aria-label="バックアップのテキスト" spellcheck="false"></textarea><div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn" data-copy>今のデータを表示・コピー</button><button class="btn" data-import>読み込む</button></div></div></div>';
     var $ = function (s) { return app.querySelector(s); };
@@ -518,6 +521,12 @@
       msg("接続しています…", true);
       api("ping").then(function () { msg("接続できました。データを同期します。", true); return pullPlans(); })
         .catch(function (e) { msg("接続できませんでした：" + e.message + "。URLとキーを確認してください。"); });
+    };
+    $("#ff").onsubmit = function (ev) {
+      ev.preventDefault();
+      var m = $("#ff-msg"); m.hidden = false; m.style.color = "var(--ink-3)"; m.textContent = "確認しています…";
+      settings.figKey = $("#ff-key").value.trim(); persist(); figState.key = null; figState.urls = {};
+      figReady().then(function (ok) { m.style.color = ok ? "var(--ok)" : "var(--ng)"; m.textContent = ok ? "図を表示できるようになりました。" : (figState.err || "パスワードが違います"); });
     };
     $("[data-clear]").onclick = function () { settings.apiUrl = ""; settings.apiKey = ""; persist(); $("#sf-url").value = ""; $("#sf-key").value = ""; setSync("local", "この端末だけに保存"); msg("同期を止めました。この端末だけに保存します。", true); };
     $("[data-copy]").onclick = function () {
@@ -719,7 +728,7 @@
       var ok = se.picked === q.a;
       h += '<div class="feedback ' + (ok ? "ok" : "ng") + '" role="status"><div class="verdict">' + (ok ? "○ 正解" : "× 不正解") + '</div>' +
         (ok ? "" : '<p><b>正解：' + KANA[se.order.indexOf(q.a)] + '</b> ' + esc(q.c[q.a]) + '</p>') +
-        '<p>' + esc(q.exp) + '</p><div class="ref">出典：' + esc(q.ref) + '</div></div>';
+        '<p>' + esc(q.exp) + '</p>' + figSlot(q.id) + '<div class="ref">出典：' + esc(q.ref) + '</div></div>';
     }
     h += '<div class="qnav">' + (answered ? '<button class="btn primary" data-next>' + (se.idx + 1 < se.ids.length ? "次の問題" : "結果を見る") + '</button>' : "") + '</div>' +
       '<div class="kbdhint">キーボード：1〜3で解答、Enterで次へ</div></div></div>';
@@ -727,6 +736,7 @@
     app.querySelector("[data-quit]").onclick = quitSession;
     app.querySelectorAll("[data-c]").forEach(function (b) { b.onclick = function () { answer(+b.dataset.c); }; });
     var nx = app.querySelector("[data-next]"); if (nx) { nx.onclick = next; nx.focus(); }
+    fillFigs();
     if (se.deadline) { clearInterval(tick); updTimer(); tick = setInterval(updTimer, 1000); }
   }
   function updTimer() {
@@ -774,7 +784,7 @@
     var list = se.answers.map(function (a) {
       var q = QMAP[a.qid];
       return '<div class="ritem"><span class="mk ' + (a.ok ? "ok" : "ng") + '">' + (a.ok ? "○" : "×") + '</span><span><span class="qq">' + esc(q.q) + '</span>' +
-        '<details' + (a.ok ? "" : " open") + '><summary>答えと解説</summary><p style="margin:6px 0"><b>正解：</b>' + esc(q.c[q.a]) + (a.ok ? "" : '<br><b>あなたの答え：</b>' + esc(q.c[a.picked])) + '</p><p style="margin:0">' + esc(q.exp) + '</p><p class="small muted" style="margin:4px 0 0">出典：' + esc(q.ref) + '</p></details></span></div>';
+        '<details' + (a.ok ? "" : " open") + '><summary>答えと解説</summary><p style="margin:6px 0"><b>正解：</b>' + esc(q.c[q.a]) + (a.ok ? "" : '<br><b>あなたの答え：</b>' + esc(q.c[a.picked])) + '</p><p style="margin:0">' + esc(q.exp) + '</p>' + figSlot(q.id) + '<p class="small muted" style="margin:4px 0 0">出典：' + esc(q.ref) + '</p></details></span></div>';
     }).join("");
     var wrongN = se.answers.filter(function (a) { return !a.ok; }).length;
     app.innerHTML = '<header class="topbar"><div class="wrap"><div class="ttl">結果</div>' + syncPill() + '</div></header>' +
@@ -784,12 +794,74 @@
     var go = function (tab) { view = { name: "plan", pid: se.pid, tab: tab }; session = null; render(); };
     app.querySelector("[data-home]").onclick = function () { go("home"); };
     app.querySelector("[data-drill]").onclick = function () { go("drill"); };
+    fillFigs();
     var rt = app.querySelector("[data-retry]");
     if (rt) rt.onclick = function () {
       var ids = shuffle(se.answers.filter(function (a) { return !a.ok; }).map(function (a) { return a.qid; }));
       session = { pid: se.pid, mode: "wrong", title: "間違えた問題をもう一度", ids: ids, idx: 0, answers: [], feedback: true, order: null, picked: null };
       view = { name: "session", pid: se.pid }; render();
     };
+  }
+
+  // ---------------- 解説の図（暗号化して公開リポジトリに置いた講習資料の図） ----------------
+  // figs.enc.json の図は AES-GCM で暗号化してある。設定した「図のパスワード」から鍵を作って、その端末の中だけで復号する。
+  var figState = { data: null, key: null, urls: {}, err: "" };
+  function b64(s) { var bin = atob(s), u = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
+  function figData() {
+    if (figState.data) return Promise.resolve(figState.data);
+    return fetch("figs.enc.json").then(function (r) { if (!r.ok) throw new Error("図のファイルがありません"); return r.json(); })
+      .then(function (d) { figState.data = d; return d; });
+  }
+  // パスワードが合っていれば true
+  function figReady() {
+    if (!settings.figKey || !window.crypto || !crypto.subtle) return Promise.resolve(false);
+    if (figState.key) return Promise.resolve(true);
+    return figData().then(function (d) {
+      return crypto.subtle.importKey("raw", new TextEncoder().encode(settings.figKey), "PBKDF2", false, ["deriveKey"]).then(function (base) {
+        return crypto.subtle.deriveKey({ name: "PBKDF2", salt: b64(d.salt), iterations: d.iter, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+      }).then(function (key) {
+        return crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(d.check.iv) }, key, b64(d.check.d)).then(function () { figState.key = key; figState.err = ""; return true; });
+      });
+    }).catch(function (e) { figState.err = e && e.name === "OperationError" ? "パスワードが違います" : "図を読み込めませんでした"; return false; });
+  }
+  function figUrl(id) {
+    if (figState.urls[id]) return Promise.resolve(figState.urls[id]);
+    var it = figState.data.items[id];
+    return crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(it.iv) }, figState.key, b64(it.d)).then(function (buf) {
+      return (figState.urls[id] = URL.createObjectURL(new Blob([buf], { type: "image/jpeg" })));
+    });
+  }
+  // 問題 qid に図があれば、その枠を返す（中身はあとで fillFigs が入れる）
+  function figSlot(qid) {
+    return '<div class="figs" data-figq="' + esc(qid) + '"></div>';
+  }
+  function fillFigs(root) {
+    var slots = (root || app).querySelectorAll("[data-figq]");
+    if (!slots.length || window.KARI_DEMO) return;
+    figData().then(function (d) {
+      slots.forEach(function (el) {
+        var ids = (d.map || {})[el.dataset.figq];
+        if (!ids || !ids.length) return;
+        if (!settings.figKey) { el.innerHTML = '<p class="small muted fignote">この問題には解説の図があります。「同期の設定」で図のパスワードを入れると表示されます。</p>'; return; }
+        figReady().then(function (ok) {
+          if (!ok) { el.innerHTML = '<p class="small fignote" style="color:var(--ng)">図を表示できません（' + esc(figState.err || "パスワードを確認してください") + '）</p>'; return; }
+          el.innerHTML = '<div class="section-label" style="margin:12px 0 6px">図で確認</div>' + ids.map(function (id) {
+            return '<figure class="fig"><a data-figz="' + esc(id) + '" href="#"><img alt="' + esc(d.items[id].cap) + '" data-fig="' + esc(id) + '"></a><figcaption>' + esc(d.items[id].cap) + '<span class="small muted">（タップで拡大）</span></figcaption></figure>';
+          }).join("");
+          ids.forEach(function (id) { figUrl(id).then(function (u) { var im = el.querySelector('[data-fig="' + id + '"]'); if (im) im.src = u; }); });
+          el.querySelectorAll("[data-figz]").forEach(function (a) {
+            a.onclick = function (e) {
+              e.preventDefault(); var id = a.dataset.figz;
+              figUrl(id).then(function (u) {
+                var bg = document.createElement("div"); bg.className = "figzoom";
+                bg.innerHTML = '<img src="' + u + '" alt="' + esc(d.items[id].cap) + '"><button class="btn" type="button">閉じる</button>';
+                bg.onclick = function () { bg.remove(); }; document.body.appendChild(bg);
+              });
+            };
+          });
+        });
+      });
+    }).catch(function () { /* 図のファイルがない版でも動く */ });
   }
 
   // ---------------- 鳥獣判別（技能試験の写真問題） ----------------
