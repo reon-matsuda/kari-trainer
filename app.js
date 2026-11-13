@@ -390,6 +390,9 @@
     if (view.name === "session") return renderSession();
     if (view.name === "result") return renderResult();
     if (view.name === "plan") return renderPlan();
+    if (view.name === "zsession") return renderZ();
+    if (view.name === "zresult") return renderZResult();
+    if (view.name === "zlist") return renderZList();
   }
 
   // ---------------- タイトル（セーブデータ選択） ----------------
@@ -601,7 +604,7 @@
       var n = 0, ok = 0; QUESTIONS.forEach(function (q) { if (q.cat === c.id) { n += s.st[q.id].n; ok += s.st[q.id].ok; } });
       h += '<button class="mode" data-go="cat:' + c.id + '"><span class="ic">' + (i + 1) + '</span><span><span class="t">' + (i + 1) + '. ' + c.name + '</span><span class="d">' + c.desc + '</span></span><span class="n">' + catCount[c.id] + '問<br><span class="small muted">' + (n ? pct(ok, n) + "%" : "—") + '</span></span></button>';
     });
-    return h + '</div><p class="small muted" style="margin-top:14px">どのモードも出題順はシャッフル。選択肢の並びも毎回入れ替わります。</p>';
+    return h + '</div>' + (ZUKAN.length ? zMenu() : "") + '<p class="small muted" style="margin-top:14px">どのモードも出題順はシャッフル。選択肢の並びも毎回入れ替わります。</p>';
   }
 
   function dayStats(p) {
@@ -652,6 +655,8 @@
 
   function bindTab(p) {
     app.querySelectorAll("[data-go]").forEach(function (b) { b.onclick = function () { startSession(p, b.dataset.go); }; });
+    app.querySelectorAll("[data-zgo]").forEach(function (b) { b.onclick = function () { zStart(p, b.dataset.zgo); }; });
+    var zl = app.querySelector("[data-zlist]"); if (zl) zl.onclick = function () { view = { name: "zlist", pid: p.id, g: "bird" }; render(); };
     var e = app.querySelector("[data-edit]"); if (e) e.onclick = function () { view = { name: "editplan", pid: p.id }; render(); };
     var sl = app.querySelector("[data-slots2]"); if (sl) sl.onclick = function () { view = { name: "slots" }; render(); };
     var st = app.querySelector("[data-setup2]"); if (st) st.onclick = function () { view = { name: "setup" }; render(); };
@@ -787,8 +792,180 @@
     };
   }
 
+  // ---------------- 鳥獣判別（技能試験の写真問題） ----------------
+  // 写真は Wikipedia の各記事の代表写真を、開いたブラウザが直接読み込む（URL は端末に30日保存）。
+  // 判別の成績は勉強計画の進捗とは別に、この端末だけに保存する。
+  var ZUKAN = QB.zukan || [], ZMAP = {}, ZBYNAME = {};
+  ZUKAN.forEach(function (z) { ZMAP[z.id] = z; ZBYNAME[z.name] = z; });
+  var zstat = load("zstat", {});   // id -> {n, ok, last}
+  var zimg = load("zimg", {});     // Wikipedia の記事名 -> {src, file, t} / {none:1, t}
+  var zs = null;                   // 判別の出題中の状態
+  var ZX = "×";
+  var ZTTL = 30 * 864e5;
+
+  function zImg(z) { for (var i = 0; i < z.wiki.length; i++) { var c = zimg[z.wiki[i]]; if (c && c.src) return c; } return null; }
+  function zNeed(list) {
+    var need = [];
+    list.forEach(function (z) {
+      if (zImg(z)) return;
+      z.wiki.forEach(function (t) { var c = zimg[t]; if ((!c || Date.now() - c.t > ZTTL) && need.indexOf(t) < 0) need.push(t); });
+    });
+    return need;
+  }
+  function zFetch(list) {
+    var need = zNeed(list), jobs = [];
+    for (var i = 0; i < need.length; i += 20) jobs.push(need.slice(i, i + 20));
+    return Promise.all(jobs.map(function (titles) {
+      var url = "https://ja.wikipedia.org/w/api.php?action=query&format=json&origin=*&prop=pageimages&piprop=thumbnail%7Cname&pithumbsize=500&redirects=1&titles=" + encodeURIComponent(titles.join("|"));
+      return fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+        var q = j.query || {}, map = {}, byTitle = {};
+        (q.normalized || []).forEach(function (n) { map[n.from] = n.to; });
+        (q.redirects || []).forEach(function (n) { map[n.from] = n.to; });
+        Object.keys(q.pages || {}).forEach(function (k) { var pg = q.pages[k]; byTitle[pg.title] = pg; });
+        titles.forEach(function (t) {
+          var cur = t, guard = 0; while (map[cur] && guard++ < 5) cur = map[cur];
+          var pg = byTitle[cur];
+          zimg[t] = pg && pg.thumbnail ? { src: pg.thumbnail.source, file: pg.pageimage || "", t: Date.now() } : { none: 1, t: Date.now() };
+        });
+      });
+    })).then(function () { save("zimg", zimg); }, function (e) { console.warn(e); });
+  }
+  function zPhoto(z, big) {
+    var c = zImg(z);
+    if (!c) return '<div class="zph empty' + (big ? " big" : "") + '"><span>写真を読み込めません<br><span class="small">（通信を確認してください）</span></span></div>';
+    return '<div class="zph' + (big ? " big" : "") + '"><img src="' + esc(c.src) + '" alt="' + (big ? "問題の写真" : esc(z.name)) + '" loading="lazy" referrerpolicy="no-referrer"></div>';
+  }
+  function zCredit(z) {
+    var c = zImg(z); if (!c || !c.file) return "";
+    return '<a class="zcredit" href="https://ja.wikipedia.org/wiki/' + encodeURIComponent("ファイル:" + c.file) + '" target="_blank" rel="noopener">写真：Wikimedia Commons（撮影者・ライセンス）</a>';
+  }
+  function zTag(z) { return '<span class="ztag ' + (z.hunt ? "h" : "n") + '">' + (z.hunt ? "狩猟" + (z.g === "bird" ? "鳥" : "獣") : "非狩猟" + (z.g === "bird" ? "鳥" : "獣")) + '</span>'; }
+  // 比べる相手：似ている種＋「この種と間違えやすい」として登録された非狩猟鳥獣
+  function zPeers(z) {
+    var out = [];
+    z.sim.forEach(function (n) { if (ZBYNAME[n] && out.indexOf(ZBYNAME[n]) < 0) out.push(ZBYNAME[n]); });
+    ZUKAN.forEach(function (o) { if (!o.hunt && o !== z && o.sim.indexOf(z.name) >= 0 && out.indexOf(o) < 0) out.push(o); });
+    return out.slice(0, 3);
+  }
+  function zCompare(z, picked) {
+    var list = [z].concat(zPeers(z));
+    if (picked && picked !== ZX && ZBYNAME[picked] && list.indexOf(ZBYNAME[picked]) < 0) list.push(ZBYNAME[picked]);
+    return '<div class="section-label" style="margin:14px 0 8px">見分け方（写真で比べる）</div><div class="zcmp">' + list.map(function (o) {
+      return '<figure class="' + (o === z ? "me" : "") + '">' + zPhoto(o, false) + '<figcaption><b>' + esc(o.name) + '</b>' + zTag(o) + '<span class="pt">' + esc(o.pt) + '</span></figcaption></figure>';
+    }).join("") + '</div>';
+  }
+
+  function zStart(p, go) {
+    var pool;
+    if (go === "bird" || go === "mammal") pool = shuffle(ZUKAN.filter(function (z) { return z.g === go; }));
+    else if (go === "wrong") pool = shuffle(ZUKAN.filter(function (z) { return zstat[z.id] && zstat[z.id].last === false; }));
+    else { // 本番形式：鳥8・獣8（うち非狩猟を各2〜3）
+      var pick = function (g, n) {
+        var non = shuffle(ZUKAN.filter(function (z) { return z.g === g && !z.hunt; })).slice(0, 2 + Math.floor(Math.random() * 2));
+        return non.concat(shuffle(ZUKAN.filter(function (z) { return z.g === g && z.hunt; })).slice(0, n - non.length));
+      };
+      pool = shuffle(pick("bird", 8).concat(pick("mammal", 8)));
+    }
+    if (!pool.length) { toast(go === "wrong" ? "間違えたままの鳥獣はありません" : "問題がありません"); return; }
+    var titles = { bird: "鳥獣判別：鳥類", mammal: "鳥獣判別：獣類", wrong: "鳥獣判別：間違えた鳥獣", exam: "鳥獣判別：本番形式16問" };
+    zs = { pid: p.id, go: go, title: titles[go], ids: pool.map(function (z) { return z.id; }), idx: 0, answers: [], picked: null, opts: null, loading: true };
+    view = { name: "zsession", pid: p.id }; render();
+    zFetch(ZUKAN).then(function () { if (zs) { zs.loading = false; if (view.name === "zsession") renderZ(); } });
+  }
+  function zOpts(z) {
+    var o = z.hunt ? [z.name, z.sim[0], z.sim[1], ZX] : [ZX].concat(z.sim.slice(0, 3));
+    return shuffle(o);
+  }
+  function renderZ() {
+    var s = zs, z = ZMAP[s.ids[s.idx]];
+    if (!z) return zFinish();
+    if (!s.opts) s.opts = zOpts(z);
+    var ans = z.hunt ? z.name : ZX, done = s.picked != null;
+    var h = '<header class="topbar"><div class="wrap"><button class="iconbtn" data-quit aria-label="やめる">' + ICON.close + '</button><div class="ttl">' + esc(s.title) + '</div></div></header>' +
+      '<div class="wrap" style="padding-block:16px 48px"><div class="session">' +
+      '<div class="qhead"><span class="num small">' + (s.idx + 1) + ' / ' + s.ids.length + '</span><span class="qprog"><i style="width:' + pct(s.idx, s.ids.length) + '%"></i></span></div>' +
+      '<p class="small muted" style="margin:0 0 8px">狩猟鳥獣なら種名、狩猟鳥獣でなければ「×」。</p>' +
+      (s.loading && !zImg(z) ? '<div class="zph big empty"><span>写真を読み込み中…</span></div>' : zPhoto(z, true)) +
+      (done ? zCredit(z) : "") + '<div class="choices" style="margin-top:12px">';
+    s.opts.forEach(function (o, i) {
+      var cls = "";
+      if (done) { if (o === ans) cls = " correct"; else if (o === s.picked) cls = " wrong"; }
+      h += '<button class="choice' + cls + '" data-z="' + i + '"' + (done ? " disabled" : "") + '><span class="k">' + (i + 1) + '</span><span>' + (o === ZX ? "×（狩猟鳥獣ではない）" : esc(o)) + '</span></button>';
+    });
+    h += '</div>';
+    if (done) {
+      var ok = s.picked === ans;
+      h += '<div class="feedback ' + (ok ? "ok" : "ng") + '" role="status"><div class="verdict">' + (ok ? "○ 正解" : "× 不正解") + '</div>' +
+        '<p style="font-size:17px"><b>' + esc(z.name) + '</b> ' + zTag(z) + (z.note ? ' <span class="small">（' + esc(z.note) + '）</span>' : "") + '</p>' +
+        '<p><b>答え方：</b>' + (z.hunt ? "種名「" + esc(z.name.replace(/（.*）/, "")) + "」を書く" : "「×」を書く（種名を書くと狩猟鳥獣と答えたことになる）") + '</p>' +
+        '<p>' + esc(z.tip) + '</p>' + zCompare(z, s.picked) + '</div>';
+    }
+    h += '<div class="qnav">' + (done ? '<button class="btn primary" data-znext>' + (s.idx + 1 < s.ids.length ? "次の写真" : "結果を見る") + '</button>' : "") + '</div>' +
+      '<div class="kbdhint">キーボード：1〜4で解答、Enterで次へ</div></div></div>';
+    app.innerHTML = h;
+    app.querySelector("[data-quit]").onclick = function () { if (zs.answers.length) zFinish(); else { zs = null; view = { name: "plan", pid: s.pid, tab: "drill" }; render(); } };
+    app.querySelectorAll("[data-z]").forEach(function (b) { b.onclick = function () { zAnswer(+b.dataset.z); }; });
+    var nx = app.querySelector("[data-znext]"); if (nx) { nx.onclick = zNext; nx.focus(); }
+  }
+  function zAnswer(i) {
+    var s = zs; if (s.picked != null) return;
+    var z = ZMAP[s.ids[s.idx]], o = s.opts[i], ok = o === (z.hunt ? z.name : ZX);
+    s.picked = o; s.answers.push({ id: z.id, ok: ok, picked: o });
+    var st = zstat[z.id] = zstat[z.id] || { n: 0, ok: 0, last: null };
+    st.n++; if (ok) st.ok++; st.last = ok; save("zstat", zstat);
+    renderZ();
+  }
+  function zNext() { zs.idx++; zs.picked = null; zs.opts = null; if (zs.idx >= zs.ids.length) zFinish(); else { renderZ(); window.scrollTo(0, 0); } }
+  function zFinish() { view = { name: "zresult", pid: zs.pid }; render(); }
+  function renderZResult() {
+    var s = zs, n = s.answers.length, ok = s.answers.filter(function (a) { return a.ok; }).length;
+    var list = s.answers.map(function (a) {
+      var z = ZMAP[a.id];
+      return '<div class="zr"><span class="mk ' + (a.ok ? "ok" : "ng") + '">' + (a.ok ? "○" : "×") + '</span>' + zPhoto(z, false) +
+        '<span><b>' + esc(z.name) + '</b> ' + zTag(z) + (a.ok ? "" : '<br><span class="small">あなたの答え：' + (a.picked === ZX ? "×" : esc(a.picked)) + '</span>') + '<br><span class="small muted">' + esc(z.pt) + '</span></span></div>';
+    }).join("");
+    var wrong = s.answers.filter(function (a) { return !a.ok; });
+    app.innerHTML = '<header class="topbar"><div class="wrap"><div class="ttl">結果</div></div></header>' +
+      '<div class="wrap" style="padding-block:16px 48px"><div class="session stack"><div class="result-hero"><span class="eyebrow">' + esc(s.title) + '</span><span class="score">' + pct(ok, n) + '<small style="font-size:24px">%</small></span><span>' + n + '枚中 ' + ok + '枚 正解</span></div>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">' + (wrong.length ? '<button class="btn blaze" data-zretry>間違えた ' + wrong.length + ' 枚をもう一度</button>' : "") + '<button class="btn primary" data-zback>演習メニュー</button></div>' +
+      (n ? '<div class="section-label">ふりかえり</div><div class="zrlist">' + list + '</div>' : "") + '</div></div>';
+    app.querySelector("[data-zback]").onclick = function () { view = { name: "plan", pid: s.pid, tab: "drill" }; zs = null; render(); };
+    var rt = app.querySelector("[data-zretry]");
+    if (rt) rt.onclick = function () { zs = { pid: s.pid, go: "wrong", title: "間違えた鳥獣をもう一度", ids: shuffle(wrong.map(function (a) { return a.id; })), idx: 0, answers: [], picked: null, opts: null, loading: false }; view = { name: "zsession", pid: s.pid }; render(); };
+  }
+  function renderZList() {
+    var g = view.g || "bird";
+    var list = ZUKAN.filter(function (z) { return z.g === g; });
+    var card = function (z) { return '<figure>' + zPhoto(z, false) + '<figcaption><b>' + esc(z.name) + '</b>' + zTag(z) + '<span class="pt">' + esc(z.pt) + '</span></figcaption></figure>'; };
+    app.innerHTML = '<header class="topbar"><div class="wrap"><button class="iconbtn" data-zlback aria-label="戻る">' + ICON.close + '</button><div class="ttl">鳥獣図鑑</div></div></header>' +
+      '<div class="wrap" style="padding-block:16px 48px"><div class="seg" style="margin-bottom:12px"><button data-zg="bird" aria-pressed="' + (g === "bird") + '">鳥類</button><button data-zg="mammal" aria-pressed="' + (g === "mammal") + '">獣類</button></div>' +
+      '<div class="section-label" style="margin-top:0">狩猟' + (g === "bird" ? "鳥 26種" : "獣 20種") + '</div><div class="zcmp grid">' + list.filter(function (z) { return z.hunt; }).map(card).join("") + '</div>' +
+      '<div class="section-label">間違えやすい非狩猟' + (g === "bird" ? "鳥" : "獣") + '</div><div class="zcmp grid">' + list.filter(function (z) { return !z.hunt; }).map(card).join("") + '</div>' +
+      '<p class="small muted">写真：Wikipedia／Wikimedia Commons の各記事の代表写真（撮影者・ライセンスは判別問題の解答後に出るリンクから確認できます）。</p></div>';
+    app.querySelector("[data-zlback]").onclick = function () { view = { name: "plan", pid: view.pid, tab: "drill" }; render(); };
+    app.querySelectorAll("[data-zg]").forEach(function (b) { b.onclick = function () { view.g = b.dataset.zg; renderZList(); }; });
+    if (zNeed(list).length) zFetch(list).then(function () { if (view.name === "zlist") renderZList(); });
+  }
+  function zMenu() {
+    var wrongN = ZUKAN.filter(function (z) { return zstat[z.id] && zstat[z.id].last === false; }).length;
+    var rate = function (g) { var n = 0, ok = 0; ZUKAN.forEach(function (z) { if (z.g === g && zstat[z.id]) { n += zstat[z.id].n; ok += zstat[z.id].ok; } }); return n ? pct(ok, n) + "%" : "—"; };
+    var nb = ZUKAN.filter(function (z) { return z.g === "bird"; }).length, nm = ZUKAN.length - nb;
+    return '<div class="section-label">鳥獣判別（技能試験・写真）</div><div class="modes">' +
+      '<button class="mode" data-zgo="exam"><span class="ic">判</span><span><span class="t">本番形式</span><span class="d">写真16枚（鳥8・獣8）。種名か「×」で答える</span></span><span class="n">16枚</span></button>' +
+      '<button class="mode" data-zgo="bird"><span class="ic">鳥</span><span><span class="t">鳥類（網猟でよく出る）</span><span class="d">狩猟鳥26種＋間違えやすい非狩猟鳥</span></span><span class="n">' + nb + '枚<br><span class="small muted">' + rate("bird") + '</span></span></button>' +
+      '<button class="mode" data-zgo="mammal"><span class="ic">獣</span><span><span class="t">獣類（わな猟でよく出る）</span><span class="d">狩猟獣20種＋間違えやすい非狩猟獣</span></span><span class="n">' + nm + '枚<br><span class="small muted">' + rate("mammal") + '</span></span></button>' +
+      '<button class="mode" data-zgo="wrong"><span class="ic">×</span><span><span class="t">間違えた鳥獣</span><span class="d">最後に間違えた写真をまとめて</span></span><span class="n">' + wrongN + '枚</span></button>' +
+      '<button class="mode" data-zlist><span class="ic">図</span><span><span class="t">鳥獣図鑑で覚える</span><span class="d">写真と見分けポイントの一覧</span></span><span class="n">' + ZUKAN.length + '種</span></button>' +
+      '</div>';
+  }
+
   // キーボード操作（PC）
   document.addEventListener("keydown", function (e) {
+    if (view.name === "zsession" && zs && !e.target.matches("input,textarea,select")) {
+      if (zs.picked == null && /^[1-4]$/.test(e.key) && zs.opts) { zAnswer(+e.key - 1); e.preventDefault(); }
+      else if (zs.picked != null && (e.key === "Enter" || e.key === " ")) { zNext(); e.preventDefault(); }
+      return;
+    }
     if (view.name !== "session" || !session || e.target.matches("input,textarea,select")) return;
     if (session.picked == null && /^[1-3]$/.test(e.key)) { var ci = session.order[+e.key - 1]; if (ci != null) answer(ci); e.preventDefault(); }
     else if (session.picked != null && (e.key === "Enter" || e.key === " ")) { next(); e.preventDefault(); }
