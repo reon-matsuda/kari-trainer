@@ -695,6 +695,7 @@
     if (go === "daily") {
       var done = {}; planEvents(p.id).forEach(function (e) { if (e.d === s.D && e.mode === "daily") done[e.qid] = 1; });
       ids = shuffle(s.set.ids.filter(function (id) { return !done[id]; }));
+      var offset = s.set.ids.length - ids.length; // 別のタブや端末ですでに解いた数（番号とゲージをその続きから表示する）
       title = jpw(s.D) + "の演習問題";
       if (!ids.length) { toast("今日の分は終わっています"); return; }
     } else if (go === "ahead") {
@@ -719,7 +720,7 @@
       ids = shuffle(QUESTIONS.filter(function (q) { return q.cat === c; }).map(function (q) { return q.id; }));
       title = CATNAME[c];
     }
-    session = { pid: p.id, mode: mode === "cat" ? "cat" : go, title: title, ids: ids, idx: 0, answers: [], feedback: feedback, deadline: timer, order: null, picked: null };
+    session = { pid: p.id, mode: mode === "cat" ? "cat" : go, title: title, ids: ids, offset: go === "daily" ? offset : 0, idx: 0, answers: [], feedback: feedback, deadline: timer, order: null, picked: null };
     view = { name: "session", pid: p.id }; render();
   }
 
@@ -749,7 +750,7 @@
     var h = '<header class="topbar"><div class="wrap"><button class="iconbtn" data-quit aria-label="やめる">' + ICON.close + '</button><div class="ttl">' + esc(se.title) + '</div>' +
       (se.deadline ? '<span class="timer" data-timer></span>' : "") + '</div></header>' +
       '<div class="wrap" style="padding-block:16px 48px"><div class="session">' +
-      '<div class="qhead"><span class="num small">' + (se.idx + 1) + ' / ' + se.ids.length + '</span><span class="qprog"><i style="width:' + pct(se.idx, se.ids.length) + '%"></i></span></div>' +
+      '<div class="qhead"><span class="num small">' + ((se.offset || 0) + se.idx + 1) + ' / ' + ((se.offset || 0) + se.ids.length) + '</span><span class="qprog"><i style="width:' + pct((se.offset || 0) + se.idx, (se.offset || 0) + se.ids.length) + '%"></i></span></div>' +
       '<div class="qmeta"><span class="chip">' + CATNAME[q.cat] + '</span>' + (q.imp >= 2 ? '<span class="chip star">★ 講習で強調</span>' : "") + '</div>' +
       (isZ ? '<h2 class="qtext">この写真の鳥獣は？</h2><p class="small muted" style="margin:-4px 0 8px">狩猟鳥獣なら種名、狩猟鳥獣でなければ「×」。</p>' +
         zPhoto(q.z, true) + (answered ? zCredit(q.z) : "") + '<div class="choices" style="margin-top:12px">'
