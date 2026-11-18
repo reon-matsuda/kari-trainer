@@ -16,6 +16,14 @@
   var CATS = QB.cats; // [{id,name,short}]
   var CATNAME = {};
   CATS.forEach(function (c) { CATNAME[c.id] = c.name; });
+  // 鳥獣判別の写真問題も「問題」として扱う（id は z01・x01 など）。
+  // 写真問題を加えたのは 2026-11-18 なので、それより前の日の演習セットは文章問題だけで計算する（過去の記録を変えないため）
+  var ZSTART = "2026-11-18";
+  var ZQ = (QB.zukan || []).map(function (z) { return { id: z.id, cat: "zukan", kind: "z", z: z, imp: 0 }; });
+  ZQ.forEach(function (q) { QMAP[q.id] = q; });
+  CATNAME.zukan = "鳥獣判別（写真）";
+  var ITEMS = QUESTIONS.concat(ZQ);
+  function univ(D) { return !D || D >= ZSTART ? ITEMS : QUESTIONS; }
   var BASE_IV = [1, 3, 7, 14, 30, 60]; // 復習の間隔（日）。エビングハウスの忘却曲線にならう
   var LAP_MODES = { daily: 1, ahead: 1 };
   var KANA = ["ア", "イ", "ウ"];
@@ -96,7 +104,7 @@
       need = 0; for (k = 0; k < laps - 1; k++) need += iv[Math.min(k, iv.length - 1)];
       introDays = Math.max(1, D - need);
     }
-    return { days: D, iv: iv, introDays: introDays, introEnd: addDays(startDate, introDays - 1), perDay: Math.ceil((QUESTIONS.length * laps) / D), newPerDay: Math.ceil(QUESTIONS.length / introDays) };
+    return { days: D, iv: iv, introDays: introDays, introEnd: addDays(startDate, introDays - 1), perDay: Math.ceil((ITEMS.length * laps) / D), newPerDay: Math.ceil(ITEMS.length / introDays) };
   }
 
   function makePlan(f) {
@@ -108,7 +116,7 @@
   // 解答ログを畳み込んで、問題ごとの状態を出す
   function fold(plan, evs, beforeDate) {
     var st = {};
-    QUESTIONS.forEach(function (q) { st[q.id] = { laps: 0, stage: 0, due: null, last: null, n: 0, ok: 0, ng: 0, dailyD: null }; });
+    ITEMS.forEach(function (q) { st[q.id] = { laps: 0, stage: 0, due: null, last: null, n: 0, ok: 0, ng: 0, dailyD: null }; });
     var iv = plan.iv || BASE_IV;
     for (var i = 0; i < evs.length; i++) {
       var e = evs[i];
@@ -138,13 +146,22 @@
     var mkey = [plan.id, D, nb, lastTs, plan.startDate, plan.endDate, plan.laps, plan.introEnd].join("|");
     if (setMemo[mkey]) return setMemo[mkey];
     var st = fold(plan, evs, D);
-    var due = [], fresh = [];
+    var due = [], fresh = [], freshZ = [];
     var order = seededShuffle(QUESTIONS.map(function (q) { return q.id; }), plan.id);
+    if (D >= ZSTART) order = order.concat(seededShuffle(ZQ.map(function (q) { return q.id; }), plan.id + "|z"));
     order.forEach(function (id) {
       var s = st[id];
-      if (s.laps === 0) fresh.push(id);
+      if (s.laps === 0) (QMAP[id].kind === "z" ? freshZ : fresh).push(id);
       else if (s.due && s.due <= D) due.push(id);
     });
+    // まだ解いていない写真問題は、まだ解いていない文章問題の間に均等に混ぜる（最後にまとめて出ないように）
+    if (freshZ.length) {
+      var mixed = [], a = fresh.length, b = freshZ.length, ia = 0, ib = 0;
+      while (ia < a || ib < b) {
+        if (ib < b && (ia >= a || (ib + 0.5) / b <= (ia + 0.5) / a)) mixed.push(freshZ[ib++]); else mixed.push(fresh[ia++]);
+      }
+      fresh = mixed;
+    }
     var quota = 0, plan2 = null;
     if (D >= plan.startDate) {
       plan2 = planAhead(plan, D, st, fresh.length, accRate(evs, D));
@@ -255,9 +272,10 @@
     evs.forEach(function (e) { if (e.d === D && e.mode === "daily") doneToday[e.qid] = true; });
     var done = set.ids.filter(function (id) { return doneToday[id]; }).length;
     var st = fold(plan, evs, null);
-    var N = plan.laps, Q = QUESTIONS.length, lapUnits = 0, wrong = 0;
+    var U = univ(D);
+    var N = plan.laps, Q = U.length, lapUnits = 0, wrong = 0;
     var lapCount = []; for (var k = 0; k < Math.max(N, 1); k++) lapCount.push(0);
-    QUESTIONS.forEach(function (q) {
+    U.forEach(function (q) {
       var s = st[q.id];
       lapUnits += Math.min(s.laps, N);
       for (var k = 0; k < N; k++) if (s.laps >= k + 1) lapCount[k]++;
@@ -405,7 +423,7 @@
     var list = visiblePlans();
     var html = '<div class="wrap title-screen">' +
       '<header class="title-hero"><span class="eyebrow">新潟県 狩猟免許試験　網猟・わな猟</span><h1>狩猟免許 学科トレーニング</h1>' +
-      '<p>全' + QUESTIONS.length + '問・三択。セーブデータ（勉強計画）を選んで始めます。</p></header>' +
+      '<p>文章問題' + QUESTIONS.length + '問＋鳥獣判別の写真' + ZQ.length + '枚。セーブデータ（勉強計画）を選んで始めます。</p></header>' +
       '<div class="slot-head"><h2>勉強計画をえらぶ</h2><div class="seg" role="group" aria-label="並び順">' +
       '<button data-sort="updated" aria-pressed="' + (settings.sort !== "created") + '">最終更新順</button>' +
       '<button data-sort="created" aria-pressed="' + (settings.sort === "created") + '">作成日順</button></div></div>' +
@@ -445,7 +463,7 @@
       '<div class="field"><label for="pf-name">計画の名前</label><input type="text" id="pf-name" maxlength="30" placeholder="例：11/20 上越会場 本番" value="' + esc(f.name) + '"></div>' +
       '<div class="row2"><div class="field"><label for="pf-start">勉強開始日</label><input type="date" id="pf-start" value="' + f.startDate + '"></div>' +
       '<div class="field"><label for="pf-end">目標日（この日までに終える）</label><input type="date" id="pf-end" value="' + f.endDate + '"><span class="hint">ふつうは試験日の前日</span></div></div>' +
-      '<div class="field"><label id="pf-laps-l">テキスト（全' + QUESTIONS.length + '問）を何周する？</label><div class="stepper" aria-labelledby="pf-laps-l"><button type="button" data-step="-1" aria-label="減らす">−</button><output id="pf-laps">' + f.laps + '</output><span>周</span><button type="button" data-step="1" aria-label="増やす">＋</button></div>' +
+      '<div class="field"><label id="pf-laps-l">全' + ITEMS.length + '問を何周する？</label><div class="stepper" aria-labelledby="pf-laps-l"><button type="button" data-step="-1" aria-label="減らす">−</button><output id="pf-laps">' + f.laps + '</output><span>周</span><button type="button" data-step="1" aria-label="増やす">＋</button></div>' +
       '<span class="hint">1周目は全問を通しで解き、2周目以降は忘却曲線（1日後→3日後→7日後…）に合わせて再出題します。</span></div>' +
       '<div class="preview" id="pf-prev"></div><div class="err" id="pf-err" hidden></div>' +
       '<button class="btn primary block" type="submit">' + (p ? "保存する" : "この計画で始める") + '</button>' +
@@ -460,9 +478,9 @@
       $("#pf-err").hidden = !err; $("#pf-err").textContent = err;
       if (err) { $("#pf-prev").innerHTML = ""; return null; }
       var sc = schedule(s, e, laps);
-      $("#pf-prev").innerHTML = '<div>期間 <b>' + sc.days + '</b> 日・' + laps + '周ぶん <b>' + (QUESTIONS.length * laps) + '</b> 問</div>' +
+      $("#pf-prev").innerHTML = '<div>期間 <b>' + sc.days + '</b> 日・' + laps + '周ぶん <b>' + (ITEMS.length * laps) + '</b> 問</div>' +
         (function () {
-          var pa = planAhead({ iv: sc.iv, endDate: e, introEnd: sc.introEnd }, s, {}, QUESTIONS.length, 0.85);
+          var pa = planAhead({ iv: sc.iv, endDate: e, introEnd: sc.introEnd }, s, {}, ITEMS.length, 0.85);
           var tot = pa.load.reduce(function (a, b) { return a + b; }, 0);
           return '<div>1日あたり 約 <b>' + Math.round(tot / sc.days) + '</b> 問（多い日で ' + pa.mx + ' 問）</div><div class="small">間違えた問題のやり直しと、周回を終えた問題の復習も含みます。正答率85%と見込んだ量で、実際の正答率に合わせて毎日計算し直します。</div>';
         })() +
@@ -580,7 +598,7 @@
     else if (!set.ids.length) cta = '<p class="big">今日の予定はありません。間違えた問題や分野別で復習しましょう。</p>';
     else if (left > 0) cta = '<p class="big">' + jpw(s.D) + 'の演習：残り <b class="num">' + left + '</b> 問（新しい問題 ' + set.fresh + '・復習 ' + set.review + '）</p><button class="btn blaze block" data-go="daily">今日の演習をはじめる</button>';
     else cta = '<p class="big">今日の分は終わりました。おつかれさまでした。</p><button class="btn" data-go="ahead">明日の分を先取り（10問）</button>';
-    var lapRows = s.lapCount.map(function (n, k) { return '<div class="lap"><span>' + (k + 1) + '周目</span><span class="track"><i style="width:' + pct(n, QUESTIONS.length) + '%"></i></span><span class="v">' + pct(n, QUESTIONS.length) + '%</span></div>'; }).join("");
+    var lapRows = s.lapCount.map(function (n, k) { return '<div class="lap"><span>' + (k + 1) + '周目</span><span class="track"><i style="width:' + pct(n, s.total / Math.max(1, s.lapCount.length)) + '%"></i></span><span class="v">' + pct(n, s.total / Math.max(1, s.lapCount.length)) + '%</span></div>'; }).join("");
     var catRows = CATS.map(function (c) {
       var n = 0, ok = 0; QUESTIONS.forEach(function (q) { if (q.cat === c.id) { n += s.st[q.id].n; ok += s.st[q.id].ok; } });
       var r = n ? pct(ok, n) : null;
@@ -687,7 +705,7 @@
       title = "先取り";
       if (!ids.length) { toast("まだ解いていない問題はありません"); return; }
     } else if (go === "wrong") {
-      ids = shuffle(QUESTIONS.filter(function (q) { return s.st[q.id].last === false; }).map(function (q) { return q.id; }));
+      ids = shuffle(ITEMS.filter(function (q) { return s.st[q.id].last === false; }).map(function (q) { return q.id; }));
       title = "過去に間違った問題";
       if (!ids.length) { toast("間違えたままの問題はありません"); return; }
     } else if (go === "star") {
@@ -706,32 +724,53 @@
   }
 
   var tick = null;
+  // 写真問題を、表示のときだけ「選択肢と正解番号をもつ問題」の形にする（解答・記録の処理を文章問題と共通にするため）
+  function sessionQ(se) {
+    var q = QMAP[se.ids[se.idx]];
+    if (!q || q.kind !== "z") return q;
+    if (!se.zq || se.zq.id !== q.id) {
+      var z = q.z, opts = zOpts(z), ans = z.hunt ? z.name : ZX;
+      se.zq = { id: q.id, kind: "z", z: z, cat: "zukan", imp: 0, c: opts.map(function (o) { return o === ZX ? "×（狩猟鳥獣ではない）" : o; }), raw: opts, a: opts.indexOf(ans) };
+    }
+    return se.zq;
+  }
+  function zFeedbackHtml(z, pickedRaw) {
+    return '<p style="font-size:17px"><b>' + esc(z.name) + '</b> ' + zTag(z) + (z.note ? ' <span class="small">（' + esc(z.note) + '）</span>' : "") + '</p>' +
+      '<p><b>答え方：</b>' + (z.hunt ? "種名「" + esc(z.name.replace(/（.*）/, "")) + "」を書く" : "「×」を書く（種名を書くと狩猟鳥獣と答えたことになる）") + '</p>' +
+      '<p>' + esc(z.tip) + '</p>' + zCompare(z, pickedRaw);
+  }
   function renderSession() {
-    var se = session, q = QMAP[se.ids[se.idx]];
+    var se = session, q = sessionQ(se);
     if (!q) return finishSession();
-    if (!se.order) se.order = shuffle([0, 1, 2]);
+    var isZ = q.kind === "z";
+    if (isZ && !se.zloaded) { se.zloaded = true; zFetch(ZUKAN).then(function () { if (view.name === "session" && session === se) renderSession(); }); }
+    if (!se.order) se.order = isZ ? [0, 1, 2, 3] : shuffle([0, 1, 2]);
     var answered = se.picked != null;
     var h = '<header class="topbar"><div class="wrap"><button class="iconbtn" data-quit aria-label="やめる">' + ICON.close + '</button><div class="ttl">' + esc(se.title) + '</div>' +
       (se.deadline ? '<span class="timer" data-timer></span>' : "") + '</div></header>' +
       '<div class="wrap" style="padding-block:16px 48px"><div class="session">' +
       '<div class="qhead"><span class="num small">' + (se.idx + 1) + ' / ' + se.ids.length + '</span><span class="qprog"><i style="width:' + pct(se.idx, se.ids.length) + '%"></i></span></div>' +
       '<div class="qmeta"><span class="chip">' + CATNAME[q.cat] + '</span>' + (q.imp >= 2 ? '<span class="chip star">★ 講習で強調</span>' : "") + '</div>' +
-      '<h2 class="qtext">' + esc(q.q) + '</h2><div class="choices">';
+      (isZ ? '<h2 class="qtext">この写真の鳥獣は？</h2><p class="small muted" style="margin:-4px 0 8px">狩猟鳥獣なら種名、狩猟鳥獣でなければ「×」。</p>' +
+        zPhoto(q.z, true) + (answered ? zCredit(q.z) : "") + '<div class="choices" style="margin-top:12px">'
+        : '<h2 class="qtext">' + esc(q.q) + '</h2><div class="choices">');
+    var KEYS = isZ ? ["1", "2", "3", "4"] : KANA;
     se.order.forEach(function (ci, pos) {
       var cls = "";
       if (answered && se.feedback) { if (ci === q.a) cls = " correct"; else if (ci === se.picked) cls = " wrong"; }
       else if (answered && ci === se.picked) cls = " picked";
-      h += '<button class="choice' + cls + '" data-c="' + ci + '"' + (answered ? " disabled" : "") + '><span class="k">' + KANA[pos] + '</span><span>' + esc(q.c[ci]) + '</span></button>';
+      h += '<button class="choice' + cls + '" data-c="' + ci + '"' + (answered ? " disabled" : "") + '><span class="k">' + KEYS[pos] + '</span><span>' + esc(q.c[ci]) + '</span></button>';
     });
     h += '</div>';
     if (answered && se.feedback) {
       var ok = se.picked === q.a;
       h += '<div class="feedback ' + (ok ? "ok" : "ng") + '" role="status"><div class="verdict">' + (ok ? "○ 正解" : "× 不正解") + '</div>' +
-        (ok ? "" : '<p><b>正解：' + KANA[se.order.indexOf(q.a)] + '</b> ' + esc(q.c[q.a]) + '</p>') +
-        '<p>' + esc(q.exp) + '</p>' + figSlot(q.id) + '<div class="ref">出典：' + esc(q.ref) + '</div></div>';
+        (isZ ? zFeedbackHtml(q.z, q.raw[se.picked]) :
+          (ok ? "" : '<p><b>正解：' + KANA[se.order.indexOf(q.a)] + '</b> ' + esc(q.c[q.a]) + '</p>') +
+          '<p>' + esc(q.exp) + '</p>' + figSlot(q.id) + '<div class="ref">出典：' + esc(q.ref) + '</div>') + '</div>';
     }
     h += '<div class="qnav">' + (answered ? '<button class="btn primary" data-next>' + (se.idx + 1 < se.ids.length ? "次の問題" : "結果を見る") + '</button>' : "") + '</div>' +
-      '<div class="kbdhint">キーボード：1〜3で解答、Enterで次へ</div></div></div>';
+      '<div class="kbdhint">キーボード：1〜' + se.order.length + 'で解答、Enterで次へ</div></div></div>';
     app.innerHTML = h;
     app.querySelector("[data-quit]").onclick = quitSession;
     app.querySelectorAll("[data-c]").forEach(function (b) { b.onclick = function () { answer(+b.dataset.c); }; });
@@ -747,8 +786,9 @@
   }
   function answer(ci) {
     var se = session; if (se.picked != null) return;
-    var q = QMAP[se.ids[se.idx]], ok = ci === q.a;
-    se.picked = ci; se.answers.push({ qid: q.id, ok: ok, picked: ci });
+    var q = sessionQ(se), ok = ci === q.a;
+    se.picked = ci; se.answers.push({ qid: q.id, ok: ok, picked: ci, raw: q.raw ? q.raw[ci] : null });
+    if (q.kind === "z") { var zst = zstat[q.id] = zstat[q.id] || { n: 0, ok: 0, last: null }; zst.n++; if (ok) zst.ok++; zst.last = ok; save("zstat", zstat); }
     record(se.pid, q.id, ok, se.mode);
     if (!se.feedback) return next();
     renderSession();
@@ -783,6 +823,11 @@
     }
     var list = se.answers.map(function (a) {
       var q = QMAP[a.qid];
+      if (q.kind === "z") {
+        var z = q.z;
+        return '<div class="ritem"><span class="mk ' + (a.ok ? "ok" : "ng") + '">' + (a.ok ? "○" : "×") + '</span><span><span class="qq">写真の判別：' + esc(z.name) + ' ' + zTag(z) + '</span>' +
+          '<details' + (a.ok ? "" : " open") + '><summary>写真と見分け方</summary>' + (a.ok ? "" : '<p style="margin:6px 0"><b>あなたの答え：</b>' + (a.raw === ZX ? "×" : esc(a.raw || "")) + '</p>') + zFeedbackHtml(z, a.raw) + '</details></span></div>';
+      }
       return '<div class="ritem"><span class="mk ' + (a.ok ? "ok" : "ng") + '">' + (a.ok ? "○" : "×") + '</span><span><span class="qq">' + esc(q.q) + '</span>' +
         '<details' + (a.ok ? "" : " open") + '><summary>答えと解説</summary><p style="margin:6px 0"><b>正解：</b>' + esc(q.c[q.a]) + (a.ok ? "" : '<br><b>あなたの答え：</b>' + esc(q.c[a.picked])) + '</p><p style="margin:0">' + esc(q.exp) + '</p>' + figSlot(q.id) + '<p class="small muted" style="margin:4px 0 0">出典：' + esc(q.ref) + '</p></details></span></div>';
     }).join("");
@@ -930,7 +975,7 @@
   function zStart(p, go) {
     var pool;
     if (go === "bird" || go === "mammal") pool = shuffle(ZUKAN.filter(function (z) { return z.g === go; }));
-    else if (go === "wrong") pool = shuffle(ZUKAN.filter(function (z) { return zstat[z.id] && zstat[z.id].last === false; }));
+    else if (go === "wrong") { var lst = summary(p).st; pool = shuffle(ZUKAN.filter(function (z) { return (lst[z.id] && lst[z.id].last === false) || (!(lst[z.id] && lst[z.id].n) && zstat[z.id] && zstat[z.id].last === false); })); }
     else { // 本番形式：鳥8・獣8（うち非狩猟を各2〜3）
       var pick = function (g, n) {
         var non = shuffle(ZUKAN.filter(function (z) { return z.g === g && !z.hunt; })).slice(0, 2 + Math.floor(Math.random() * 2));
@@ -985,6 +1030,8 @@
     s.picked = o; s.answers.push({ id: z.id, ok: ok, picked: o });
     var st = zstat[z.id] = zstat[z.id] || { n: 0, ok: 0, last: null };
     st.n++; if (ok) st.ok++; st.last = ok; save("zstat", zstat);
+    // 計画の解答ログにも残す（練習扱い：周回は進めないが、「過去に間違った問題」や正答率に反映され、端末間でも同期される）
+    if (plans[s.pid]) record(s.pid, z.id, ok, "zukan");
     renderZ();
   }
   function zNext() { zs.idx++; zs.picked = null; zs.opts = null; if (zs.idx >= zs.ids.length) zFinish(); else { renderZ(); window.scrollTo(0, 0); } }
@@ -1039,7 +1086,7 @@
       return;
     }
     if (view.name !== "session" || !session || e.target.matches("input,textarea,select")) return;
-    if (session.picked == null && /^[1-3]$/.test(e.key)) { var ci = session.order[+e.key - 1]; if (ci != null) answer(ci); e.preventDefault(); }
+    if (session.picked == null && /^[1-4]$/.test(e.key) && session.order && +e.key <= session.order.length) { var ci = session.order[+e.key - 1]; if (ci != null) answer(ci); e.preventDefault(); }
     else if (session.picked != null && (e.key === "Enter" || e.key === " ")) { next(); e.preventDefault(); }
   });
 
