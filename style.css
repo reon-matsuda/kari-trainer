@@ -369,3 +369,7 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 .figzoom { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.85); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 16px; overflow: auto; }
 .figzoom img { max-width: 100%; max-height: 82vh; background: #fff; border-radius: 6px; }
 @media (min-width: 900px) { .figs .fig { max-width: 720px; } }
+.zph.ill { background: #fff; }
+.zph.ill img { object-fit: contain; background: #fff; }
+.zph.big.ill img { background: #fff; }
+.zph.ill > span { padding: 8px; text-align: center; }

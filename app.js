@@ -23,7 +23,8 @@
   ZQ.forEach(function (q) { QMAP[q.id] = q; });
   CATNAME.zukan = "鳥獣判別（写真）";
   var ITEMS = QUESTIONS.concat(ZQ);
-  function univ(D) { return !D || D >= ZSTART ? ITEMS : QUESTIONS; }
+  function zFrom(q) { return (q.z && q.z.from) || ZSTART; } // 写真問題を今日の演習に入れ始める日（あとから足した種は翌日から）
+  function univ(D) { return !D ? ITEMS : QUESTIONS.concat(ZQ.filter(function (q) { return zFrom(q) <= D; })); }
   var BASE_IV = [1, 3, 7, 14, 30, 60]; // 復習の間隔（日）。エビングハウスの忘却曲線にならう
   var LAP_MODES = { daily: 1, ahead: 1 };
   var KANA = ["ア", "イ", "ウ"];
@@ -148,7 +149,9 @@
     var st = fold(plan, evs, D);
     var due = [], fresh = [], freshZ = [];
     var order = seededShuffle(QUESTIONS.map(function (q) { return q.id; }), plan.id);
-    if (D >= ZSTART) order = order.concat(seededShuffle(ZQ.map(function (q) { return q.id; }), plan.id + "|z"));
+    // 写真問題は追加した日ごとのまとまりで並べる（あとから種を足しても、それより前の日のセットが変わらないように）
+    var zg = {}; ZQ.forEach(function (q) { var f = zFrom(q); if (f <= D) (zg[f] = zg[f] || []).push(q.id); });
+    Object.keys(zg).sort().forEach(function (f) { order = order.concat(seededShuffle(zg[f], plan.id + (f === ZSTART ? "|z" : "|z" + f))); });
     order.forEach(function (id) {
       var s = st[id];
       if (s.laps === 0) (QMAP[id].kind === "z" ? freshZ : fresh).push(id);
@@ -948,12 +951,51 @@
       });
     })).then(function () { save("zimg", zimg); }, function (e) { console.warn(e); });
   }
+  // 狩猟読本のカラー判別図（本番と同じ画風）。図のパスワードを入れた端末では写真の代わりにこれを出す
+  var zill = { idx: null, bin: null, p: null, urls: {}, bad: false };
+  function useIll(z) { return !!(z.ill && settings.figKey && !zill.bad && !window.KARI_DEMO && window.crypto && crypto.subtle); }
+  function zillLoad() {
+    if (!zill.p) zill.p = Promise.all([
+      fetch("zill.json").then(function (r) { if (!r.ok) throw new Error("no zill"); return r.json(); }),
+      fetch("zill.bin").then(function (r) { if (!r.ok) throw new Error("no zill"); return r.arrayBuffer(); }),
+      figReady()
+    ]).then(function (a) { if (!a[2]) throw new Error("key"); zill.idx = a[0]; zill.bin = a[1]; });
+    return zill.p;
+  }
+  function zillUrl(id) {
+    if (zill.urls[id]) return Promise.resolve(zill.urls[id]);
+    var it = zill.idx.items[id]; if (!it) return Promise.reject(new Error("none"));
+    return crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(it[2]) }, figState.key, new Uint8Array(zill.bin, it[0], it[1]))
+      .then(function (buf) { return (zill.urls[id] = URL.createObjectURL(new Blob([buf], { type: "image/webp" }))); });
+  }
+  // 画面に出た [data-zill] の枠に、イラストを復号して入れる（失敗したら写真に戻す）
+  function fillZill() {
+    var els = app.querySelectorAll("[data-zill]:not([data-done])");
+    if (!els.length) return;
+    els.forEach(function (el) { el.setAttribute("data-done", "1"); });
+    zillLoad().then(function () {
+      els.forEach(function (el) {
+        var id = el.getAttribute("data-zill");
+        zillUrl(id).then(function (u) { el.innerHTML = '<img src="' + u + '" alt="' + (el.classList.contains("big") ? "問題のイラスト" : esc(ZMAP[id].name)) + '">'; })
+          .catch(function () { el.outerHTML = zPhotoWeb(ZMAP[id], el.classList.contains("big")); });
+      });
+    }).catch(function () {
+      zill.bad = true;
+      zFetch(ZUKAN).then(function () { render(); });
+    });
+  }
+  if (window.MutationObserver) new MutationObserver(function () { fillZill(); }).observe(app, { childList: true, subtree: true });
   function zPhoto(z, big) {
+    if (useIll(z)) return '<div class="zph ill' + (big ? " big" : "") + '" data-zill="' + esc(z.id) + '"><span class="small muted">イラストを読み込み中…</span></div>';
+    return zPhotoWeb(z, big);
+  }
+  function zPhotoWeb(z, big) {
     var c = zImg(z);
     if (!c) return '<div class="zph empty' + (big ? " big" : "") + '"><span>写真を読み込めません<br><span class="small">（通信を確認してください）</span></span></div>';
     return '<div class="zph' + (big ? " big" : "") + '"><img src="' + esc(c.src) + '" alt="' + (big ? "問題の写真" : esc(z.name)) + '" loading="lazy" referrerpolicy="no-referrer"></div>';
   }
   function zCredit(z) {
+    if (useIll(z)) return '<span class="zcredit">イラスト：狩猟読本 口絵（大日本猟友会）</span>';
     var c = zImg(z); if (!c || !c.file) return "";
     return '<a class="zcredit" href="https://ja.wikipedia.org/wiki/' + encodeURIComponent("ファイル:" + c.file) + '" target="_blank" rel="noopener">写真：Wikimedia Commons（撮影者・ライセンス）</a>';
   }
@@ -968,7 +1010,7 @@
   function zCompare(z, picked) {
     var list = [z].concat(zPeers(z));
     if (picked && picked !== ZX && ZBYNAME[picked] && list.indexOf(ZBYNAME[picked]) < 0) list.push(ZBYNAME[picked]);
-    return '<div class="section-label" style="margin:14px 0 8px">見分け方（写真で比べる）</div><div class="zcmp">' + list.map(function (o) {
+    return '<div class="section-label" style="margin:14px 0 8px">見分け方（並べて比べる）</div><div class="zcmp">' + list.map(function (o) {
       return '<figure class="' + (o === z ? "me" : "") + '">' + zPhoto(o, false) + '<figcaption><b>' + esc(o.name) + '</b>' + zTag(o) + '<span class="pt">' + esc(o.pt) + '</span></figcaption></figure>';
     }).join("") + '</div>';
   }
@@ -1003,7 +1045,7 @@
       '<div class="wrap" style="padding-block:16px 48px"><div class="session">' +
       '<div class="qhead"><span class="num small">' + (s.idx + 1) + ' / ' + s.ids.length + '</span><span class="qprog"><i style="width:' + pct(s.idx, s.ids.length) + '%"></i></span></div>' +
       '<p class="small muted" style="margin:0 0 8px">狩猟鳥獣なら種名、狩猟鳥獣でなければ「×」。</p>' +
-      (s.loading && !zImg(z) ? '<div class="zph big empty"><span>写真を読み込み中…</span></div>' : zPhoto(z, true)) +
+      (s.loading && !zImg(z) && !useIll(z) ? '<div class="zph big empty"><span>写真を読み込み中…</span></div>' : zPhoto(z, true)) +
       (done ? zCredit(z) : "") + '<div class="choices" style="margin-top:12px">';
     s.opts.forEach(function (o, i) {
       var cls = "";
@@ -1061,7 +1103,7 @@
       '<div class="wrap" style="padding-block:16px 48px"><div class="seg" style="margin-bottom:12px"><button data-zg="bird" aria-pressed="' + (g === "bird") + '">鳥類</button><button data-zg="mammal" aria-pressed="' + (g === "mammal") + '">獣類</button></div>' +
       '<div class="section-label" style="margin-top:0">狩猟' + (g === "bird" ? "鳥 26種" : "獣 20種") + '</div><div class="zcmp grid">' + list.filter(function (z) { return z.hunt; }).map(card).join("") + '</div>' +
       '<div class="section-label">間違えやすい非狩猟' + (g === "bird" ? "鳥" : "獣") + '</div><div class="zcmp grid">' + list.filter(function (z) { return !z.hunt; }).map(card).join("") + '</div>' +
-      '<p class="small muted">写真：Wikipedia／Wikimedia Commons の各記事の代表写真（撮影者・ライセンスは判別問題の解答後に出るリンクから確認できます）。</p></div>';
+      '<p class="small muted">' + (settings.figKey ? 'イラスト：狩猟読本 口絵（大日本猟友会）。読本にない種（ノイヌ・ノネコ・シベリアイタチ・ドバトなど）は Wikipedia／Wikimedia Commons の写真です。' : '写真：Wikipedia／Wikimedia Commons の各記事の代表写真です。「同期の設定」で図のパスワードを入れると、本番と同じ画風の狩猟読本のイラストに変わります。') + '</p></div>';
     app.querySelector("[data-zlback]").onclick = function () { view = { name: "plan", pid: view.pid, tab: "drill" }; render(); };
     app.querySelectorAll("[data-zg]").forEach(function (b) { b.onclick = function () { view.g = b.dataset.zg; renderZList(); }; });
     if (zNeed(list).length) zFetch(list).then(function () { if (view.name === "zlist") renderZList(); });
@@ -1071,7 +1113,7 @@
     var rate = function (g) { var n = 0, ok = 0; ZUKAN.forEach(function (z) { if (z.g === g && zstat[z.id]) { n += zstat[z.id].n; ok += zstat[z.id].ok; } }); return n ? pct(ok, n) + "%" : "—"; };
     var nb = ZUKAN.filter(function (z) { return z.g === "bird"; }).length, nm = ZUKAN.length - nb;
     return '<div class="section-label">鳥獣判別（技能試験・写真）</div><div class="modes">' +
-      '<button class="mode" data-zgo="exam"><span class="ic">判</span><span><span class="t">本番形式</span><span class="d">写真16枚（鳥8・獣8）。種名か「×」で答える</span></span><span class="n">16枚</span></button>' +
+      '<button class="mode" data-zgo="exam"><span class="ic">判</span><span><span class="t">本番形式</span><span class="d">16枚（鳥8・獣8）。種名か「×」で答える</span></span><span class="n">16枚</span></button>' +
       '<button class="mode" data-zgo="bird"><span class="ic">鳥</span><span><span class="t">鳥類（網猟でよく出る）</span><span class="d">狩猟鳥26種＋間違えやすい非狩猟鳥</span></span><span class="n">' + nb + '枚<br><span class="small muted">' + rate("bird") + '</span></span></button>' +
       '<button class="mode" data-zgo="mammal"><span class="ic">獣</span><span><span class="t">獣類（わな猟でよく出る）</span><span class="d">狩猟獣20種＋間違えやすい非狩猟獣</span></span><span class="n">' + nm + '枚<br><span class="small muted">' + rate("mammal") + '</span></span></button>' +
       '<button class="mode" data-zgo="wrong"><span class="ic">×</span><span><span class="t">間違えた鳥獣</span><span class="d">最後に間違えた写真をまとめて</span></span><span class="n">' + wrongN + '枚</span></button>' +
