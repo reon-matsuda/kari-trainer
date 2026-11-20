@@ -953,7 +953,8 @@
   }
   // 狩猟読本のカラー判別図（本番と同じ画風）。図のパスワードを入れた端末では写真の代わりにこれを出す
   var zill = { idx: null, bin: null, p: null, urls: {}, bad: false };
-  function useIll(z) { return !!(z.ill && settings.figKey && !zill.bad && !window.KARI_DEMO && window.crypto && crypto.subtle); }
+  var USE_ILL = false; // 2026-11-20 ご要望により、鳥獣判別の画像はすべてネットの写真に戻した（true にすると読本のイラストに戻る）
+  function useIll(z) { return !!(USE_ILL && z.ill && settings.figKey && !zill.bad && !window.KARI_DEMO && window.crypto && crypto.subtle); }
   function zillLoad() {
     if (!zill.p) zill.p = Promise.all([
       fetch("zill.json").then(function (r) { if (!r.ok) throw new Error("no zill"); return r.json(); }),
@@ -1103,7 +1104,7 @@
       '<div class="wrap" style="padding-block:16px 48px"><div class="seg" style="margin-bottom:12px"><button data-zg="bird" aria-pressed="' + (g === "bird") + '">鳥類</button><button data-zg="mammal" aria-pressed="' + (g === "mammal") + '">獣類</button></div>' +
       '<div class="section-label" style="margin-top:0">狩猟' + (g === "bird" ? "鳥 26種" : "獣 20種") + '</div><div class="zcmp grid">' + list.filter(function (z) { return z.hunt; }).map(card).join("") + '</div>' +
       '<div class="section-label">間違えやすい非狩猟' + (g === "bird" ? "鳥" : "獣") + '</div><div class="zcmp grid">' + list.filter(function (z) { return !z.hunt; }).map(card).join("") + '</div>' +
-      '<p class="small muted">' + (settings.figKey ? 'イラスト：狩猟読本 口絵（大日本猟友会）。読本にない種（ノイヌ・ノネコ・シベリアイタチ・ドバトなど）は Wikipedia／Wikimedia Commons の写真です。' : '写真：Wikipedia／Wikimedia Commons の各記事の代表写真です。「同期の設定」で図のパスワードを入れると、本番と同じ画風の狩猟読本のイラストに変わります。') + '</p></div>';
+      '<p class="small muted">' + (USE_ILL && settings.figKey ? 'イラスト：狩猟読本 口絵（大日本猟友会）。読本にない種（ノイヌ・ノネコ・シベリアイタチ・ドバトなど）は Wikipedia／Wikimedia Commons の写真です。' : '写真：Wikipedia／Wikimedia Commons の各記事の代表写真です。「同期の設定」で図のパスワードを入れると、本番と同じ画風の狩猟読本のイラストに変わります。') + '</p></div>';
     app.querySelector("[data-zlback]").onclick = function () { view = { name: "plan", pid: view.pid, tab: "drill" }; render(); };
     app.querySelectorAll("[data-zg]").forEach(function (b) { b.onclick = function () { view.g = b.dataset.zg; renderZList(); }; });
     if (zNeed(list).length) zFetch(list).then(function () { if (view.name === "zlist") renderZList(); });
